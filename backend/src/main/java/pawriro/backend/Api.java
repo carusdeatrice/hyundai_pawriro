@@ -74,16 +74,20 @@ public final class Api {
             String path = request.getRequestURI().getPath();
             String method = request.getRequestMethod();
             String[] p = path.substring(1).split("/");
-            if (!(path.equals("/vehicle/detour") && method.equals("POST")) && !path.startsWith("/guardian/") && !((path.equals("/health") || (path.equals("/vehicle/feed") || path.equals("/vehicle/candidates"))) && method.equals("GET"))) {
+            boolean destinationSearch = path.equals("/vehicle/destinations") && method.equals("POST");
+            boolean routeOverview = path.equals("/vehicle/route-overview") && method.equals("POST");
+            if (!destinationSearch && !routeOverview && !(path.equals("/vehicle/detour") && method.equals("POST")) && !path.startsWith("/guardian/") && !((path.equals("/health") || (path.equals("/vehicle/feed") || path.equals("/vehicle/candidates"))) && method.equals("GET"))) {
                 authorize(request, path.startsWith("/review/") || p.length == 4 && p[0].equals("participations") &&
                     p[2].equals("points") && method.equals("PUT"));
             }
-            try (Connection db = connect()) {
+            if (destinationSearch) response = DestinationSearch.search(body(request));
+            else if (routeOverview) response = VehicleRouting.overview(body(request));
+            else try (Connection db = connect()) {
                 db.setAutoCommit(false);
                 response = dispatch(db, request, method, p);
                 db.commit();
             }
-            if (method.equals("POST") && !path.equals("/search/route") && !path.equals("/vehicle/detour") && !path.startsWith("/guardian/")) status = 201;
+            if (method.equals("POST") && !destinationSearch && !routeOverview && !path.equals("/search/route") && !path.equals("/vehicle/detour") && !path.startsWith("/guardian/")) status = 201;
         } catch (Problem problem) {
             status = problem.status;
             response = Map.of("detail", problem.getMessage());

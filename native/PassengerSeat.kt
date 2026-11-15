@@ -49,21 +49,6 @@ internal class PassengerSeat(context: Context) : AutoCloseable {
             }
         }
 
-    suspend fun parked(): Boolean = withTimeoutOrNull(1500) {
-        suspendCancellableCoroutine { continuation ->
-            val once = java.util.concurrent.atomic.AtomicBoolean()
-            fun finish(parked: Boolean) {
-                if (once.compareAndSet(false,true)) continuation.resume(parked)
-            }
-            try {
-                vehicle.getGear().getCurrentGearSelectionState(
-                    { finish(it == ai.pleos.playground.vehicle.constant.control.VehicleGear.GEAR_PARK) },
-                    { finish(false) }
-                )
-            } catch (_: RuntimeException) { finish(false) }
-        }
-    } == true
-
     suspend fun driverOccupied(): Boolean? = withTimeoutOrNull(1500) {
         suspendCancellableCoroutine { continuation ->
             val once=java.util.concurrent.atomic.AtomicBoolean()

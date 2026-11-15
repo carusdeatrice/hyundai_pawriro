@@ -20,6 +20,7 @@ import androidx.lifecycle.lifecycleScope
 
 internal enum class Screen { Home, Search, Preview, Drive, Report, Mine, Complete, Participation, GuardianCreate }
 internal data class Place(val name: String, val address: String, val time: Int, val distance: String)
+internal data class DestinationResult(val name: String, val address: String, val latitude: Double, val longitude: Double)
 internal val places = listOf(
     Place("서울숲 주차장", "서울 성동구 성수동1가 685", 24, "12.4 km"),
     Place("서울숲 가족마당", "서울 성동구 뚝섬로 273", 26, "13.1 km"),
@@ -32,13 +33,20 @@ internal class PawriroState {
     var guardianAddress by mutableStateOf("http://10.0.2.2:8000")
     var guardianReports by mutableStateOf(emptyList<PetReport>())
     var guardianFeedError by mutableStateOf("")
-    var configureGuardianAddress: (String) -> Unit = {}
     var refreshGuardianFeed: () -> Unit = {}
     val searchableReports get() = reports + guardianReports.filter { synced -> reports.none { it.id==synced.id } }
     var screen by mutableStateOf(Screen.Home)
     var query by mutableStateOf("")
+    var destinationStarting by mutableStateOf(false)
+    var pendingNativeDestination by mutableStateOf<DestinationResult?>(null)
+    var routeRevision by mutableIntStateOf(0)
+    var showRouteOverview by mutableStateOf(false)
+    var startDestination: (DestinationResult) -> Unit = {}
+
     var place by mutableStateOf(places.first())
     var parkedForResult by mutableStateOf(false)
+    var guardianParked by mutableStateOf(false)
+    var guardianCarRestricted by mutableStateOf(true)
     var participationRows by mutableStateOf(emptyList<org.json.JSONObject>())
     var submitParticipation: (String, Boolean, String, Offset?, String?) -> Unit = { _,_,_,_,_ -> }
     var passenger by mutableStateOf(false)
@@ -73,8 +81,8 @@ internal class PawriroState {
     var sdkTurnAt = 0L
     var speechDiagnostic by mutableStateOf("Pleos 음성 연결 대기")
     var demoMode by mutableStateOf(false)
-    var vehicleDetour by mutableStateOf<VehicleDetour?>(null)
     var showingVehicleRoute by mutableStateOf(false)
+    var navigationPosition by mutableStateOf<VisitPoint?>(null)
     var sdkLocation by mutableStateOf<ai.pleos.playground.location.fused.model.LocationData?>(null)
     private var store: ReportStore? = null
     private var draftId = UUID.randomUUID().toString()
@@ -95,6 +103,10 @@ internal class PawriroState {
     val locked get() = restricted || driving
     fun notify(message: String) { toast = message }
     fun back() {
+        if (restricted && screen in setOf(Screen.Mine,Screen.GuardianCreate)) {
+            screen=Screen.Home
+            return
+        }
         if (locked) return
         if (screen == Screen.Report) saveDraft()
         if (editingId != null) { cancelEdit(); return }
@@ -109,7 +121,6 @@ internal class PawriroState {
         asked.clear()
         routePosition = 0
         appliedRealStop = null
-        vehicleDetour = null
         activeOffer = null
         demoWaypoints = emptyList()
         rescue = false
@@ -119,8 +130,9 @@ internal class PawriroState {
     fun stop() {
         screen = Screen.Home
         showingVehicleRoute = false
+        showRouteOverview = false
+        pendingNativeDestination = null
         appliedRealStop = null
-        vehicleDetour = null
         activeOffer = null
         demoWaypoints = emptyList()
         prompt = false
@@ -220,6 +232,8 @@ class PawriroComposeActivity : ComponentActivity() {
     private var removingSearch = false
 
     private var offeredVehicleDetour: VehicleDetour? = null
+    private var resumed by mutableStateOf(false)
+    private var openGuidanceOnResume by mutableStateOf(false)
     private var nextVehicleSearch = 0L
     private var realPlan: RealDetour? = null
     private var approvedStop: ApprovedStop? = null
@@ -252,7 +266,7 @@ class PawriroComposeActivity : ComponentActivity() {
                 verifier.gps(gps?.let { VisitPoint(it.latitude,it.longitude) },gps?.timestampMillis ?: 0,
                     System.currentTimeMillis())
                 if (stop.exit==null) {
-                    val parked=seat?.parked()
+                    val parked=readParked()
                     verifier.vehicle(parked,seat?.driverDoorOpen(),seat?.driverOccupied(),
                         android.os.SystemClock.elapsedRealtime())
                 }
@@ -316,7 +330,7 @@ class PawriroComposeActivity : ComponentActivity() {
             if (!state.restricted && state.parkedForResult && state.screen == Screen.Participation) {
                 lifecycleScope.launch {
                     if (receiver == null && packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE) &&
-                        seat?.parked() != true) {
+                        readParked() != true) {
                         state.parkedForResult = false
                         state.notify("차량 주차 상태를 확인할 수 없어요")
                         return@launch
@@ -330,11 +344,6 @@ class PawriroComposeActivity : ComponentActivity() {
         val settings=getSharedPreferences("pawriro-guardian",MODE_PRIVATE)
         state.guardianAddress=settings.getString("url","http://10.0.2.2:8000")!!
         state.refreshGuardianFeed={ lifecycleScope.launch { refreshGuardianFeed() } }
-        state.configureGuardianAddress={ address ->
-            state.guardianReports=emptyList()
-            state.guardianAddress=address
-            settings.edit().putString("url",address).apply()
-        }
         state.initialize(ReportStore(getSharedPreferences("pawriro-reports",MODE_PRIVATE)))
         state.choosePhoto = {
             if (!state.locked) {
@@ -349,6 +358,8 @@ class PawriroComposeActivity : ComponentActivity() {
         val automotive = packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE)
         state.restricted = automotive && !demo
         state.parkedForResult = demo || !automotive
+        state.guardianParked = !automotive
+        state.guardianCarRestricted = automotive
         voice = VoiceOutput(this)
         if (automotive) {
             runCatching {
@@ -356,6 +367,22 @@ class PawriroComposeActivity : ComponentActivity() {
             }.onFailure { state.speechDiagnostic="Pleos 음성 초기화 실패"; Log.w("PawriroPleos","Speech initialization failed",it) }
             seat = runCatching { PassengerSeat(this) }
                 .onFailure { Log.w("PawriroPleos","Vehicle seat service unavailable",it) }.getOrNull()
+        }
+        state.startDestination = { result ->
+            if (state.screen==Screen.Search && !state.restricted && !state.destinationStarting) {
+                state.destinationStarting=true
+                state.pendingNativeDestination=result
+                lifecycleScope.launch {
+                    try {
+                        if (pleos?.startDestination(result)!=true && state.pendingNativeDestination==result) {
+                            state.pendingNativeDestination=null
+                            state.notify("Pleos에서 목적지 안내를 요청할 수 없어요")
+                        }
+                    } finally {
+                        state.destinationStarting=false
+                    }
+                }
+            }
         }
         state.showPreview = { place ->
             state.place = place
@@ -371,10 +398,14 @@ class PawriroComposeActivity : ComponentActivity() {
                 }
             }
         }
-        if (automotive && !demo) {
+        if (automotive) {
             try {
                 vehicle = VehicleRestrictions(this) { restricted ->
-                    runOnUiThread { setRestriction(restricted) }
+                    runOnUiThread {
+                        state.guardianCarRestricted = restricted
+                        if (restricted) state.guardianParked = false
+                        if (!demo) setRestriction(restricted)
+                    }
                 }
             } catch (_: LinkageError) {
                 state.restricted = true
@@ -454,8 +485,44 @@ class PawriroComposeActivity : ComponentActivity() {
                 snapshotFlow { if (state.screen == Screen.Report && state.editingId == null) state.draft() to state.step else null }
                     .collect { if (it != null) state.saveDraft() }
             }
-            LaunchedEffect(state.driving,state.showingVehicleRoute) {
-                while (state.driving) {
+            LaunchedEffect(state.screen,state.guardianCarRestricted,state.restricted) {
+                if (automotive && state.screen in setOf(Screen.GuardianCreate, Screen.Mine)) {
+                    state.guardianParked = false
+                    while (!state.guardianCarRestricted && !state.restricted) {
+                        val parked = readParked()
+                        state.guardianParked = parked == true && !state.guardianCarRestricted && !state.restricted
+                        delay(500)
+                    }
+                }
+                if (state.screen==Screen.Participation && !state.restricted && !state.demoMode && automotive)
+                    refreshParkedState()
+            }
+            LaunchedEffect(state.pendingNativeDestination,state.sdkDestination,state.sdkRouteState,
+                resumed,openGuidanceOnResume,state.screen) {
+                val destination = state.sdkDestination ?: return@LaunchedEffect
+                if (state.demoMode || !state.sdkRouteState.isGuiding()) return@LaunchedEffect
+                val pending = state.pendingNativeDestination
+                val selectedDestination = pending != null &&
+                    VisitPoint(destination.latitude,destination.longitude)
+                        .distance(VisitPoint(pending.latitude,pending.longitude))<=150
+                val returnToGuidance = openGuidanceOnResume && resumed &&
+                    state.screen in setOf(Screen.Home,Screen.Search)
+                if (!selectedDestination && !returnToGuidance) return@LaunchedEffect
+                val bringForward = selectedDestination && !resumed && state.screen==Screen.Search
+                openGuidanceOnResume=false
+                state.stop()
+                state.asked.clear()
+                state.showingVehicleRoute=true
+                state.screen=Screen.Drive
+                if (bringForward) {
+                    runCatching {
+                        startActivity(Intent(this@PawriroComposeActivity,PawriroComposeActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                    }.onFailure { Log.w("PawriroPleos","Unable to return to pawriro",it) }
+                }
+            }
+            LaunchedEffect(state.driving,state.showingVehicleRoute,state.pendingNativeDestination) {
+                while (state.driving || state.pendingNativeDestination!=null) {
                     pleos?.refresh()
                     if (state.showingVehicleRoute && !voiceWindowAvailable()) dismissPrompt()
                     else if (state.showingVehicleRoute) offer()
@@ -484,10 +551,22 @@ class PawriroComposeActivity : ComponentActivity() {
             !packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE))
         parkingCheck?.cancel()
         if (!restricted && receiver == null && !state.parkedForResult) {
-            parkingCheck = lifecycleScope.launch { state.parkedForResult = seat?.parked() == true && !state.restricted }
+            refreshParkedState()
         }
         if (restricted && state.screen != Screen.Drive) cancelSeatCheck()
         if (!restricted) dismissPrompt()
+    }
+
+    private suspend fun readParked(): Boolean? {
+        val source = vehicle ?: return null
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { source.parked() }
+    }
+
+    private fun refreshParkedState() {
+        parkingCheck?.cancel()
+        parkingCheck = lifecycleScope.launch {
+            state.parkedForResult = readParked() == true && !state.restricted
+        }
     }
 
     private suspend fun readPassenger() = demoSeat ?: seat?.confirmed() ?: false
@@ -561,7 +640,6 @@ class PawriroComposeActivity : ComponentActivity() {
         val applied = appliedSearch ?: return
         if (applied.address != address || seatCheck?.isActive == true || removingSearch) return
         if (reports.any { it.id == applied.offer.reportId && applied.offer.area in it.areas }) return
-        state.vehicleDetour = null
         removingSearch = true
         val result = try {
             pleos?.removeSearchWaypoint(applied.plan) ?: PleosReadClient.Removal.Unconfirmed
@@ -695,7 +773,6 @@ class PawriroComposeActivity : ComponentActivity() {
         }
         appliedSearch = AppliedSearch(address, fresh.offer, fresh.plan)
         if (!state.driving || !state.showingVehicleRoute) return
-        state.vehicleDetour = fresh
         state.activeOffer = fresh.offer
         state.appliedRealStop = fresh.plan.stop.name
         state.rescue = true
@@ -846,7 +923,15 @@ class PawriroComposeActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        resumed=true
+        openGuidanceOnResume=state.screen in setOf(Screen.Home,Screen.Search)
+        pleos?.refresh()
+    }
+
     override fun onPause() {
+        resumed=false
         if (state.screen == Screen.Report) state.saveDraft()
         dismissPrompt()
         super.onPause()

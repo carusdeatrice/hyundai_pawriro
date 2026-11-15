@@ -6,6 +6,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -22,7 +27,6 @@ import java.util.UUID
 
 @Composable
 internal fun GuardianScreen(state: PawriroState) {
-    var address by remember { mutableStateOf(state.guardianAddress) }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     val client=state.guardianClient
@@ -33,8 +37,16 @@ internal fun GuardianScreen(state: PawriroState) {
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val focus = androidx.compose.ui.platform.LocalFocusManager.current
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    LaunchedEffect(state.guardianParked,state.guardianCarRestricted) {
+        if (!state.guardianParked || state.guardianCarRestricted) {
+            focus.clearFocus(force=true)
+            keyboard?.hide()
+        }
+    }
     fun work(action: suspend () -> Unit) {
-        if (busy || !state.parkedForResult || state.restricted) return
+        if (busy || !state.guardianParked || state.guardianCarRestricted || state.restricted) return
         busy=true
         error=""
         scope.launch {
@@ -42,7 +54,14 @@ internal fun GuardianScreen(state: PawriroState) {
             catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (failure is GuardianHttpError && failure.status==401) state.guardianClient=null
-                error=failure.message ?: "서버 연결을 확인하세요"
+                error=when {
+                    failure is GuardianHttpError && failure.status==401 && client==null ->
+                        "계정 또는 비밀번호를 확인해 주세요."
+                    failure is GuardianHttpError && failure.status==401 ->
+                        "로그인 세션이 만료됐어요. 다시 로그인해 주세요."
+                    failure is java.io.IOException -> "서버에 연결할 수 없어요. 백엔드 실행 상태를 확인해 주세요."
+                    else -> failure.message ?: "서버 연결을 확인해 주세요."
+                }
             }
             finally { busy=false }
         }
@@ -52,36 +71,39 @@ internal fun GuardianScreen(state: PawriroState) {
         state.refreshGuardianFeed()
     }
 
-    LaunchedEffect(client) {
+    LaunchedEffect(client,state.guardianParked,state.restricted) {
         if (client != null) work { refresh(client) }
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement=Arrangement.spacedBy(12.dp)) {
         IconAction(R.drawable.paw_back,"뒤로") {
-            if (creating) state.back()
+            if (state.restricted) state.screen=Screen.Home
+            else if (creating) state.back()
             else if (editor!=null || sightings!=null) { editor=null; sightings=null } else state.back()
         }
-        Label(if (creating) "실종 신고" else "내 신고",26,bold=true)
-        if (!state.parkedForResult) {
+        Label(if (creating) "실종 신고" else "내 신고",if (client==null) 32 else 26,bold=true)
+        if (state.restricted || state.guardianCarRestricted || !state.guardianParked) {
             Label("차량 주차 상태를 확인한 후 이용할 수 있어요")
             return@Column
         }
-        if (error.isNotEmpty()) Label(error,16,Color(0xffba315e))
+        if (error.isNotEmpty()) Label(error,18,Color(0xffba315e))
         val api=client
         when {
             api==null -> {
-                GuardianField("API 주소",address,{ address=it })
-                GuardianField("테스트 계정",username,{ username=it })
-                GuardianField("비밀번호",password,{ password=it },secret=true)
-                TextAction("로그인",primary=true,enabled=!busy) {
-                    work {
-                        val connection=GuardianClient(address)
-                        val response=connection.request("/guardian/login","POST",
-                            JSONObject().put("username",username.trim()).put("password",password)) as JSONObject
-                        connection.token=response.getString("token")
-                        password=""
-                        state.configureGuardianAddress(address)
-                        state.guardianClient=connection
+                Column(Modifier.widthIn(max=560.dp).fillMaxWidth(),
+                    verticalArrangement=Arrangement.spacedBy(18.dp)) {
+                    LoginField("테스트 계정",username,{ username=it },enabled=!busy)
+                    LoginField("비밀번호",password,{ password=it },enabled=!busy,secret=true)
+                    TextAction(if (busy) "로그인 중…" else "로그인",Modifier.fillMaxWidth(),
+                        primary=true,height=64,enabled=!busy && username.isNotBlank() && password.isNotEmpty()) {
+                        work {
+                            val connection=GuardianClient(state.guardianAddress)
+                            val response=connection.request("/guardian/login","POST",
+                                JSONObject().put("username",username.trim()).put("password",password)) as JSONObject
+                            connection.token=response.getString("token")
+                            password=""
+                            state.guardianClient=connection
+                        }
                     }
                 }
             }
@@ -274,4 +296,22 @@ private fun GuardianField(label: String,value: String,change: (String)->Unit,sec
     Label(label,14,muted,true)
     BasicTextField(value,change,Modifier.fillMaxWidth().background(Color.White).padding(14.dp),
         singleLine=true,visualTransformation=if (secret) PasswordVisualTransformation() else VisualTransformation.None)
+}
+
+
+@Composable
+private fun LoginField(label: String, value: String, change: (String) -> Unit, enabled: Boolean, secret: Boolean = false) {
+    val shape = RoundedCornerShape(12.dp)
+    Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+        Label(label,20,bold=true)
+        BasicTextField(value,change,Modifier.fillMaxWidth(),enabled=enabled,singleLine=true,
+            textStyle=TextStyle(color=Color(0xff17221c), fontSize=23.sp),
+            visualTransformation=if (secret) PasswordVisualTransformation() else VisualTransformation.None,
+            keyboardOptions=KeyboardOptions(keyboardType=if (secret) KeyboardType.Password else KeyboardType.Ascii),
+            decorationBox={ field ->
+                Box(Modifier.fillMaxWidth().heightIn(min=60.dp).background(Color.White,shape)
+                    .border(1.dp,Color(0xffb1beb5),shape).padding(horizontal=18.dp,vertical=12.dp),
+                    contentAlignment=androidx.compose.ui.Alignment.CenterStart) { field() }
+            })
+    }
 }

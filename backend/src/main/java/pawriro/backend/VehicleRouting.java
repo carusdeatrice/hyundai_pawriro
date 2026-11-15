@@ -43,6 +43,32 @@ final class VehicleRouting {
         }
     }
 
+    static Object overview(JsonNode input) {
+        JsonNode points = input.path("stops");
+        if (!points.isArray() || points.size()<2 || points.size()>4)
+            throw new Api.Problem(422,"Origin, destination and up to two waypoints required");
+        List<JsonNode> stops = new ArrayList<>();
+        points.forEach(point -> {
+            Api.point(point);
+            stops.add(point);
+        });
+        if (System.getenv("ORS_API_KEY") == null || System.getenv("ORS_API_KEY").isBlank())
+            throw new Api.Problem(503,"Routing provider key unavailable");
+        if (!REQUESTS.tryAcquire()) throw new Api.Problem(429,"Routing busy");
+        try {
+            Route result = route("driving-car",stops,100);
+            if (result == null) throw new Api.Problem(404,"Route unavailable");
+            return Map.of("line",result.line());
+        } catch (InterruptedException cancelled) {
+            Thread.currentThread().interrupt();
+            throw new Api.Problem(503,"Routing interrupted");
+        } catch (IOException failure) {
+            throw new Api.Problem(503,"Routing provider unavailable");
+        } finally {
+            REQUESTS.release();
+        }
+    }
+
     private static Object calculate(Connection db, JsonNode input)
             throws SQLException, IOException, InterruptedException {
         String mode = input.path("mode").asText();
@@ -248,11 +274,15 @@ final class VehicleRouting {
     }
 
     private static Route route(String profile, List<JsonNode> stops) throws IOException, InterruptedException {
+        return route(profile,stops,35);
+    }
+
+    private static Route route(String profile, List<JsonNode> stops, int radius) throws IOException, InterruptedException {
         var coordinates = JSON.createArrayNode();
         var radiuses = JSON.createArrayNode();
         stops.forEach(stop -> {
             coordinates.add(stop);
-            radiuses.add(35);
+            radiuses.add(radius);
         });
         var body = JSON.createObjectNode();
         body.set("coordinates", coordinates);

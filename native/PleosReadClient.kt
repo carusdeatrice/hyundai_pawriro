@@ -39,6 +39,9 @@ internal data class RealDetour(
     val searchStops get() = listOfNotNull(stop, exit)
 }
 
+internal fun RouteStateInfo?.isGuiding() =
+    this != null && !isRouting && naviMode in setOf(NaviMode.ROUTE_GUIDING,NaviMode.SIMULATION_GUIDING)
+
 internal class PleosReadClient(private val activity: Activity, private val state: PawriroState) : AutoCloseable {
     private val context = activity.applicationContext
     private var navi: NaviHelper? = null
@@ -63,11 +66,10 @@ internal class PleosReadClient(private val activity: Activity, private val state
             state.sdkDestination = destinationInfo
             queriedDestination = NaviStop(destinationInfo.latitude,destinationInfo.longitude,destinationInfo.name,
                 destinationInfo.address,destinationInfo.poiId,destinationInfo.poiSubId,destinationInfo.poiProvider)
-            if (state.vehicleDetour?.plan?.route?.destination?.sameLocation(queriedDestination!!) == false)
-                state.vehicleDetour = null
             publishSnapshot()
             val destination = queriedDestination ?: return@publish
-            if (state.sdkTrip == null && !tripRequested && state.sdkRouteState?.naviMode==NaviMode.ROUTE_GUIDING) {
+            if (state.sdkTrip == null && (!tripRequested || android.os.SystemClock.elapsedRealtime()>tripExpiry) &&
+                state.sdkRouteState?.naviMode in setOf(NaviMode.ROUTE_GUIDING,NaviMode.SIMULATION_GUIDING)) {
                 tripRequested=true
                 tripDestination=destination
                 tripExpiry=android.os.SystemClock.elapsedRealtime()+5000
@@ -83,12 +85,6 @@ internal class PleosReadClient(private val activity: Activity, private val state
             state.sdkWaypoints = waypointInfoList
             queriedWaypoints = waypointInfoList.map { NaviStop(it.latitude,it.longitude,it.name,it.address,
                 it.poiId,it.poiSubId,it.poiProvider) }
-            state.vehicleDetour?.plan?.let { plan ->
-                val expected = plan.route.waypoints.toMutableList().apply { addAll(plan.index, plan.searchStops) }
-                val actual = queriedWaypoints.orEmpty()
-                if (actual.size != expected.size || actual.zip(expected).any { (a,b) -> !a.sameLocation(b) })
-                    state.vehicleDetour = null
-            }
             publishSnapshot()
             Log.i("PawriroPleos","Waypoints received: ${waypointInfoList.size}")
         }
@@ -97,6 +93,14 @@ internal class PleosReadClient(private val activity: Activity, private val state
             if (routeStateInfo.naviMode !in setOf(NaviMode.ROUTE_GUIDING,NaviMode.SIMULATION_GUIDING)
                 && !routeStateInfo.isRouting && query==null && routeResult==null) clearRoute()
             Log.i("PawriroPleos","Route state received")
+        }
+        override fun onCurrentLocationInfo(info: ai.pleos.playground.navi.data.CurrentLocationInfo) = publish {
+            state.navigationPosition = VisitPoint(info.latitude,info.longitude).takeIf {
+                it.lat in -90.0..90.0 && it.lon in -180.0..180.0 && (it.lat!=0.0 || it.lon!=0.0)
+            }
+        }
+        override fun onRouteStarted(info: ai.pleos.playground.navi.data.RouteStartInfo) = publish {
+            refresh()
         }
         override fun onTBTInfo(tbtInfoList: List<TBTInfo>) = publish {
             state.sdkTurn = tbtInfoList.firstOrNull()
@@ -108,14 +112,23 @@ internal class PleosReadClient(private val activity: Activity, private val state
                 android.os.SystemClock.elapsedRealtime()<=tripExpiry) state.sdkTrip=tripInfo
         }
         override fun onDestinationChanged() = publish {
+            state.routeRevision++
             clearTrip()
             state.sdkTurn=null
             state.sdkTurnAt=0
             refresh()
         }
         override fun onRoutingCompleted() = publish {
+            state.routeRevision++
             clearTrip()
             if (routeResult?.complete(true) != true && query == null) refresh()
+        }
+        override fun onReRouteEnded() = publish {
+            state.routeRevision++
+            clearTrip()
+            state.sdkTurn=null
+            state.sdkTurnAt=0
+            refresh()
         }
         override fun onRouteEnded() = publish { clearRoute() }
         override fun onRouteCancelled() = publish { clearRoute() }
@@ -178,7 +191,7 @@ internal class PleosReadClient(private val activity: Activity, private val state
         tripRequested=false
     }
     private fun clearRoute() {
-        state.vehicleDetour = null
+        if (state.sdkDestination!=null) state.routeRevision++
         clearTrip()
         state.sdkTurn=null
         state.sdkTurnAt=0
@@ -197,6 +210,7 @@ internal class PleosReadClient(private val activity: Activity, private val state
             navi?.getDestinationInfo()
             navi?.getWaypointInfo()
             navi?.getTBTInfo()
+            navi?.getCurrentLocationInfo()
         }.onFailure { Log.w("PawriroPleos","Navi query failed",it) }
     }
     suspend fun readActiveRoute(): NaviSnapshot? {
@@ -215,6 +229,23 @@ internal class PleosReadClient(private val activity: Activity, private val state
             null
         } finally {
             query = null
+        }
+    }
+
+    fun startDestination(place: DestinationResult): Boolean {
+        val helper = navi ?: return false
+        if (!ready || routeResult != null || query != null || state.restricted) return false
+        clearTrip()
+        state.sdkWaypointsReceived=false
+        state.sdkRouteState=null
+        return try {
+            helper.requestRoute(RouteInfo(latitude=place.latitude,longitude=place.longitude,
+                poiName=place.name,address=place.address,poiId="",poiSubId="",poiProvider=""))
+            true
+        } catch (error: RuntimeException) {
+            Log.w("PawriroPleos","Destination route request failed",error)
+            refresh()
+            false
         }
     }
 
