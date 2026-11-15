@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application' version '8.9.2'
+    id 'org.jetbrains.kotlin.android' version '2.1.20'
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.1.20'
+}
+
+android {
+    namespace 'kr.routerescue.demo'
+    compileSdk 35
+    buildToolsVersion "36.0.0"
+    defaultConfig {
+        applicationId 'kr.routerescue.demo'
+        minSdk 30
+        targetSdk 32
+        versionCode 2
+        versionName '1.1'
+    }
+    buildFeatures {
+        compose true
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    sourceSets {
+        test.java.srcDirs = ['test/kotlin']
+        main {
+            manifest.srcFile 'AndroidManifest.xml'
+            java.srcDirs = ['native', 'native-platform']
+            res.srcDirs = ['res']
+        }
+    }
+    buildTypes {
+        debug { signingConfig null }
+    }
+}
+
+dependencies {
+    implementation 'ai.pleos.playground:NaviHelper:3.0.5'
+    implementation 'ai.pleos.playground:FusedLocation:1.1.3'
+    implementation "ai.pleos.playground:TextToSpeech:3.3.1"
+    implementation "ai.pleos.playground:SpeechToText:3.3.1"
+    implementation "ai.pleos.playground:Vehicle:2.3.2"
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation "org.json:json:20240303"
+    implementation platform('androidx.compose:compose-bom:2025.04.01')
+    implementation 'androidx.activity:activity-compose:1.10.1'
+    implementation 'androidx.compose.foundation:foundation'
+    implementation 'androidx.compose.material3:material3'
+    compileOnly files("${android.sdkDirectory}/platforms/android-37.0/optional/android.car.jar")
+}
