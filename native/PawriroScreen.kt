@@ -91,7 +91,8 @@ internal fun PawriroScreen(state: PawriroState) {
     BackHandler(state.screen!=Screen.Home || state.restricted) { state.back() }
     BoxWithConstraints(Modifier.fillMaxSize().background(panel)) {
         val narrow=maxWidth<=820.dp
-        val blocked=state.restricted && !state.driving
+        val blocked=state.restricted && state.screen !in
+            setOf(Screen.Home,Screen.Drive,Screen.Mine,Screen.GuardianCreate)
         if (!blocked) {
             when(state.screen) {
                 Screen.Home -> Home(state,narrow)
@@ -105,7 +106,6 @@ internal fun PawriroScreen(state: PawriroState) {
             }
         }
         if (blocked) {
-            if (state.screen==Screen.Home) PawriroMap(Modifier.matchParentSize())
             Column(Modifier.fillMaxSize().background(Color(0xf5151e19)).padding(20.dp),
                 verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
                 Glyph(R.drawable.paw_lock,32,lime)
@@ -165,10 +165,11 @@ private fun Home(state: PawriroState, narrow: Boolean) {
         val active=state.searchableReports.filter { it.status==ReportStatus.Active }
         PawriroMap(Modifier.matchParentSize(),visibleAreas=active.filter { it.publicCoverage.isEmpty() }.flatMap { it.areas },
             publicCoverage=active.flatMap { it.publicCoverage.values },
-            reportPins=active.mapNotNull { it.pin },onArea={ area ->
+            reportPins=if (state.restricted) emptyList() else active.mapNotNull { it.pin },
+            onArea=if (state.restricted) null else { area ->
                 active.firstOrNull { area in it.areas }?.let { state.notify("${it.name} · ${it.time} · $area") }
             })
-        Row(Modifier.align(Alignment.TopStart).padding(margin.dp),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+        if (!state.restricted) Row(Modifier.align(Alignment.TopStart).padding(margin.dp),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
             SearchBar(state,Modifier.width(searchWidth),false,narrow)
             IconAction(R.drawable.paw_menu,"메뉴",size=if (narrow) 58 else 64,elevation=8,click={})
         }
@@ -187,7 +188,7 @@ private fun Home(state: PawriroState, narrow: Boolean) {
                 state.screen=Screen.Drive
             }
         }
-        if (state.participationRows.isNotEmpty()) {
+        if (!state.restricted && state.participationRows.isNotEmpty()) {
             TextAction("수색 참여 내역",Modifier.align(Alignment.TopEnd).padding(24.dp)) {
                 state.screen=Screen.Participation
             }
@@ -222,6 +223,27 @@ private fun HomeAction(title: String, subtitle: String, icon: Int, modifier: Mod
 
 @Composable
 private fun Search(state: PawriroState) {
+    val real = !state.demoMode && !state.searchingLocation
+    val query = state.query.trim()
+    var results by remember(query) { mutableStateOf(emptyList<DestinationResult>()) }
+    var status by remember(query) { mutableStateOf("") }
+    LaunchedEffect(real,query,state.guardianAddress) {
+        if (!real || query.length !in 2..120) return@LaunchedEffect
+        results=emptyList()
+        status="목적지 검색 중…"
+        delay(450)
+        try {
+            val body=org.json.JSONObject().put("query",query)
+            val rows=GuardianClient(state.guardianAddress).request("/vehicle/destinations","POST",body) as org.json.JSONArray
+            results=rows.objects().map { row -> DestinationResult(row.getString("name"),row.getString("address"),
+                row.getDouble("latitude"),row.getDouble("longitude")) }
+            status=if (results.isEmpty()) "검색 결과가 없어요" else ""
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            status="목적지 검색을 사용할 수 없어요 · 서버와 ORS 설정 확인"
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().background(Color(0xfff8faf8)).padding(horizontal=24.dp,vertical=18.dp),
             horizontalArrangement=Arrangement.spacedBy(14.dp),verticalAlignment=Alignment.CenterVertically) {
@@ -231,7 +253,19 @@ private fun Search(state: PawriroState) {
         Spacer(Modifier.fillMaxWidth().height(1.dp).background(border))
         Column(Modifier.widthIn(max=860.dp).verticalScroll(rememberScrollState()).padding(24.dp,30.dp)) {
             Label("검색 결과",13,muted,true)
-            places.filter { (it.name+it.address).contains(state.query.trim()) }.forEachIndexed { index, place ->
+            if (real) {
+                if (query.length<2) Label("장소명 또는 주소를 두 글자 이상 입력하세요",16,muted)
+                else if (query.length>120) Label("검색어를 120자 이내로 입력하세요",16,muted)
+                if (status.isNotEmpty()) Label(status,16,muted)
+                if (state.pendingNativeDestination != null)
+                    Label("Pleos에서 경로 선택 후 pawriro로 돌아오세요",16,muted)
+                if (state.destinationStarting) Label("Pleos 안내 시작 확인 중…",16,muted)
+                else results.forEachIndexed { index, result ->
+                    SearchRow(result.name,result.address,index+1) {
+                        state.startDestination(result)
+                    }
+                }
+            } else places.filter { (it.name+it.address).contains(query) }.forEachIndexed { index, place ->
                 SearchRow(place.name,place.address,index+1) {
                     if (state.searchingLocation) {
                         state.sightingPlace=place.name
@@ -243,9 +277,11 @@ private fun Search(state: PawriroState) {
                     }
                 }
             }
-            Spacer(Modifier.height(30.dp))
-            Label("최근 목적지",13,muted,true)
-            SearchRow("그랜드 워커힐 서울","어제 · 광진구 워커힐로 177",null) {}
+            if (!real) {
+                Spacer(Modifier.height(30.dp))
+                Label("최근 목적지",13,muted,true)
+                SearchRow("그랜드 워커힐 서울","어제 · 광진구 워커힐로 177",null) {}
+            }
         }
     }
 }
@@ -343,22 +379,22 @@ private fun Drive(state: PawriroState,narrow: Boolean) {
     val live=state.showingVehicleRoute
     val destination=state.sdkDestination
     val turn=state.sdkTurn
-    val calculated = state.vehicleDetour.takeIf { live }
-    val livePosition=state.sdkLocation?.takeIf {
-        System.currentTimeMillis()-it.timestampMillis in 0..15_000
-    }?.let { mapPoint(org.json.JSONArray().put(it.longitude).put(it.latitude)) }
-        ?.takeIf { calculated != null || it.x in 0f..1000f && it.y in 0f..680f }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val width=maxWidth
         val height=maxHeight
-        if (calculated != null) {
-            VehicleRouteMap(calculated, livePosition, Modifier.matchParentSize())
-            Box(Modifier.align(Alignment.BottomStart).padding(start=24.dp,bottom=108.dp)
-                .background(Color.White,RoundedCornerShape(8.dp)).padding(8.dp)) {
-                Label("계산 경로 · 수색 구역",13,muted)
+        if (live) {
+            RouteOverview(state,Modifier.matchParentSize()) { hasLine,status ->
+                Column(Modifier.align(Alignment.BottomStart).padding(start=22.dp,bottom=108.dp)
+                    .background(Color.White,RoundedCornerShape(8.dp)).padding(8.dp),
+                    verticalArrangement=Arrangement.spacedBy(6.dp)) {
+                    if (hasLine) Label("예상 경로 · Pleos 안내와 다를 수 있어요",14,ink,true)
+                    else Label(status.ifBlank { "활성 경로선 미확보" },14,ink,true)
+                    if (!state.showRouteOverview)
+                        TextAction("예상 경로 보기",primary=true) { state.showRouteOverview=true }
+                }
             }
         } else {
-            PawriroMap(Modifier.matchParentSize(),route=!live,rescue=!live && state.rescue,position=if (live) livePosition else state.driveRoute[state.routePosition],
+            PawriroMap(Modifier.matchParentSize(),route=true,rescue=state.rescue,position=state.driveRoute[state.routePosition],
                 routePoints=state.driveRoute,rescueStop=state.activeOffer?.waypoint,
                 visibleAreas=state.searchableReports.filter { it.status==ReportStatus.Active && it.publicCoverage.isEmpty() }.flatMap { it.areas },
                 publicCoverage=state.guardianReports.flatMap { it.publicCoverage.values })
@@ -403,18 +439,18 @@ private fun Drive(state: PawriroState,narrow: Boolean) {
                 }
             }
         }
-        if (live && !state.restricted) {
+        if (live) {
             Column(Modifier.align(Alignment.TopEnd).padding(22.dp)
                 .background(Color.White,RoundedCornerShape(12.dp)).padding(12.dp)) {
                 Label("목적지 · ${destination?.name ?: "정보 미확보"}",15,bold=true)
                 Label("경유지 · ${if (state.sdkWaypointsReceived) state.sdkWaypoints.joinToString(" · ") { it.name }.ifBlank { "없음" } else "정보 미확보"}",13,muted)
-                Label("Trip 좌표 ${state.sdkTrip?.summary?.routePoints?.size ?: 0}개 · 전체 경로 확인 필요",13,muted)
-                Label(if (livePosition == null) "현재 위치 미확보 또는 시연 지도 범위 밖" else "FusedLocation 위치 수신",13,muted)
+                if (!state.restricted) Label("Trip 좌표 ${state.sdkTrip?.summary?.routePoints?.size ?: 0}개 · 전체 경로 확인 필요",13,muted)
+                if (!state.restricted) Label(if (state.sdkLocation == null) "현재 위치 미확보" else "FusedLocation 위치 수신",13,muted)
                 Label(state.naviDiagnostic,13,muted)
-                Label(state.speechDiagnostic,13,muted)
+                if (!state.restricted) Label(state.speechDiagnostic,13,muted)
             }
         }
-        if (state.rescue && (!live || calculated != null || state.demoMode)) {
+        if (state.rescue && !live) {
             Row(Modifier.offset(x=width*(if (narrow) .48f else .62f),y=height*.36f)
                 .shadow(5.dp,RoundedCornerShape(12.dp)).background(Color.White,RoundedCornerShape(12.dp))
                 .padding(horizontal=13.dp,vertical=9.dp),horizontalArrangement=Arrangement.spacedBy(8.dp),
