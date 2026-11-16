@@ -1,6 +1,9 @@
 # pawriro
 
-## 앱 이름 및 한 줄 소개
+## 시연영상
+https://github.com/carusdeatrice/hyundai_pawriro/pull/3
+
+## 한 줄 소개
 
 **pawriro** — 차량 내비 경로 주변의 실종 반려동물 수색 구역을 안내하고, 참여를 수락하면 수색 경유지를 반영하는 차량용 앱입니다.
 
