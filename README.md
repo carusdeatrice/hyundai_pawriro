@@ -1,30 +1,58 @@
 # pawriro
 
-차량 화면은 `native/`의 Kotlin과 Jetpack Compose 코드로 실행합니다.
+## 앱 이름 및 한 줄 소개
 
-## 빌드 및 실행
+**pawriro** — 차량 내비 경로 주변의 실종 반려동물 수색 구역을 안내하고, 참여를 수락하면 수색 경유지를 반영하는 차량용 앱입니다.
 
-```sh
-./build.sh
-./demo.sh install
-```
+## 실행 방법
 
-빌드에 JDK 21, Android SDK Platform 35, Build Tools 36.0.0, Automotive API 스텁을 포함한 Android 플랫폼 37.0이 필요합니다. 이 컴퓨터에서는 프로젝트의 `build/toolchain`에도 JDK 21과 SDK 35가 준비되어 있습니다. 다른 컴퓨터에서는 JDK 21과 필요한 Android SDK를 설치하고, 필요하면 `JAVA_HOME`과 `ANDROID_SDK_ROOT`를 지정합니다. Gradle Wrapper가 빌드 도구와 Compose 의존성을 내려받습니다.
+1. Android Studio에서 Pleos Connect 에뮬레이터를 켭니다.
+2. 저장소 루트에서 백엔드를 실행합니다. 이미 실행 중이라면 그대로 사용합니다.
 
-APK는 `build/pawriro.apk`입니다. 기존 앱을 업데이트할 때는 동일한 `build/demo.keystore`를 사용합니다.
+   ```sh
+   ./backend/start.sh
+   ```
+
+3. 별도 터미널에서 제출용 APK를 설치하고 ORS 시연 모드로 실행합니다.
+
+   ```sh
+   ./demo.sh install-release-ors
+   ```
+
+4. 앱에서 **왕십리역**을 검색해 ORS 결과를 선택하고 **안내 시작**을 누릅니다. 가상 주행 명령과 결과 제출 순서는 아래의 에뮬레이터 시연 및 수색 결과 항목을 참고하세요.
+
+일반 모드로 실행하려면 APK 설치 후 에뮬레이터 앱 목록에서 **pawriro**를 엽니다.
+
+## 테스트 환경 및 필요한 설정
+
+- Android Studio, Android SDK Platform Tools(ADB), Pleos Connect 에뮬레이터가 필요합니다. SDK가 기본 위치에 없다면 `ANDROID_SDK_ROOT`를 설정합니다.
+- 목적지 검색 및 ORS 경로 계산에는 백엔드의 `ORS_API_KEY`가 필요합니다. 서버에는 JDK 21과 PostgreSQL/PostGIS가 필요합니다. DB 초기화와 계정 발급은 [백엔드 설정](backend/README.md)을 참고하세요.
+- 에뮬레이터의 기본 백엔드 주소는 `http://10.0.2.2:8000`입니다. Mac에서 `curl -f http://127.0.0.1:8000/health`로 서버 상태를 확인할 수 있습니다.
+- ORS 검색·경로와 OpenStreetMap 지도 타일을 불러오려면 인터넷 연결이 필요합니다. 수색 제안을 확인하려면 주행 경로 근처에 활성 실종 신고가 필요합니다.
+- 소스에서 APK를 빌드하려면 JDK 21, Android SDK Platform 35, Build Tools 36.0.0, 자동차 API 스텁이 포함된 Android Platform 37.0을 준비합니다.
+
+## Pleos Connect 에뮬레이터 버전 및 화면 규격
+
+- **Pleos Connect v2.1.0** · Android Automotive API 34 · ARM64
+- **2560 × 1440 px** · 가로 16:9 · AVD 설정 160 dpi
+
+## APK 파일 위치
+
+- [apk/조수인_pawriro_release.apk](apk/조수인_pawriro_release.apk)
+- 소스에서 제출용 APK를 다시 생성하려면 `./build.sh release`를 실행합니다. 릴리스 빌드를 생성하고 로컬 서명 키로 서명한 뒤 설치용 APK를 저장합니다.
 
 ## 주요 파일
 
 - `native/PawriroActivity.kt` 앱 상태, 주행 제한, 음성 안내, 개발용 이벤트
 - `native/PawriroScreen.kt` 홈, 검색, 미리보기와 주행 안내
 - `native/PawriroReports.kt` 실종 신고 4단계와 내 신고
-- `native/PawriroMap.kt` React 시안과 같은 좌표를 쓰는 Compose 지도
+- `native/PawriroMap.kt` 신고 입력과 내비 화면의 지도 오버레이
 
 ## 에뮬레이터 시연
 
 목적지를 선택해 안내를 시작한 뒤 `./demo.sh drive`를 실행합니다. `./demo.sh reply 참여할게`로 수색 경유지를 표시합니다. `./demo.sh timeout`, `./demo.sh fail`, `./demo.sh park`, `./demo.sh stop`도 지원합니다.
 
-지도와 경로, 음성 응답은 시연 데이터를 사용합니다.
+ORS 시연 모드는 실제 지도와 ORS 자동차 경로를 사용합니다. 차량 이동과 수락은 터미널 명령으로 재현합니다.
 
 ## 신고·경로 매칭
 
