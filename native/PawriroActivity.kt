@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.geometry.Offset
 import java.util.UUID
+import org.json.JSONArray
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.*
@@ -81,6 +82,21 @@ internal class PawriroState {
     var sdkTurnAt = 0L
     var speechDiagnostic by mutableStateOf("Pleos 음성 연결 대기")
     var demoMode by mutableStateOf(false)
+    var orsDemo by mutableStateOf(false)
+    var orsDestination: DestinationResult? = null
+    var demoPosition by mutableStateOf(Offset(((127.044-127.022)/.000026).toFloat(), ((37.557-37.541)/.000025).toFloat()))
+    var orsBaseline by mutableStateOf<OrsDemoRoute?>(null)
+    var orsRoute by mutableStateOf<OrsDemoRoute?>(null)
+    var orsDetour: OrsDemoRoute? = null
+    var orsDeparture: Offset? = null
+    val displayedRoute get() = orsRoute?.line ?: driveRoute
+    val movementFrames get() = orsRoute?.frames ?: driveRoute
+    val remainingDemoLine get() =
+        orsRoute?.remainingLine(routePosition) ?: demoRouteFor(place).drop(routePosition)
+    fun clearOrsDetour() {
+        orsDetour = null
+        orsDeparture = null
+    }
     var showingVehicleRoute by mutableStateOf(false)
     var navigationPosition by mutableStateOf<VisitPoint?>(null)
     var sdkLocation by mutableStateOf<ai.pleos.playground.location.fused.model.LocationData?>(null)
@@ -120,6 +136,8 @@ internal class PawriroState {
         showingVehicleRoute = false
         asked.clear()
         routePosition = 0
+        orsRoute = orsBaseline
+        clearOrsDetour()
         appliedRealStop = null
         activeOffer = null
         demoWaypoints = emptyList()
@@ -355,6 +373,8 @@ class PawriroComposeActivity : ComponentActivity() {
         val demo = emulator && intent.getBooleanExtra("demo", false)
         state.showNaviDiagnostic = demo
         state.demoMode = demo
+        state.orsDemo = demo && intent.getBooleanExtra("orsDemo", false)
+        if (state.orsDemo) state.showNaviDiagnostic = false
         val automotive = packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE)
         state.restricted = automotive && !demo
         state.parkedForResult = demo || !automotive
@@ -374,7 +394,21 @@ class PawriroComposeActivity : ComponentActivity() {
                 state.pendingNativeDestination=result
                 lifecycleScope.launch {
                     try {
-                        if (pleos?.startDestination(result)!=true && state.pendingNativeDestination==result) {
+                        if (state.orsDemo) {
+                            val route = loadOrsDemoRoute(state.guardianAddress, listOf(
+                                geoPoint(state.demoPosition),
+                                JSONArray().put(result.longitude).put(result.latitude)))
+                            if (state.screen != Screen.Search || state.pendingNativeDestination != result) return@launch
+                            state.pendingNativeDestination = null
+                            if (route == null) {
+                                state.notify("ORS 경로를 불러올 수 없어요 · 서버 확인")
+                            } else {
+                                state.orsDestination = result
+                                state.orsBaseline = route
+                                state.showPreview(Place(result.name, result.address, route.minutes,
+                                    "%.1f km".format(route.meters / 1000)))
+                            }
+                        } else if (pleos?.startDestination(result)!=true && state.pendingNativeDestination==result) {
                             state.pendingNativeDestination=null
                             state.notify("Pleos에서 목적지 안내를 요청할 수 없어요")
                         }
@@ -432,9 +466,14 @@ class PawriroComposeActivity : ComponentActivity() {
                         "tick" -> {
                             val previous = state.routePosition
                             if (!demoParked && state.driving) {
-                                state.routePosition = minOf(previous+1,state.driveRoute.lastIndex)
+                                if (state.orsDemo && state.prompt) return
+                                state.routePosition = minOf(previous+1,state.movementFrames.lastIndex)
+                                if (state.orsDemo) state.demoPosition = state.movementFrames[state.routePosition]
                                 state.activeOffer?.takeIf { state.appliedRealStop == null }?.let { active ->
-                                    val index = state.driveRoute.indexOf(active.waypoint)
+                                    val index = if (state.orsRoute == null) state.driveRoute.indexOf(active.waypoint)
+                                    else (1 until state.movementFrames.lastIndex).minByOrNull {
+                                        (state.movementFrames[it] - active.waypoint).getDistance()
+                                    } ?: -1
                                     if (index >= 0 && previous < index && state.routePosition == index) {
                                         recordEvidence(if (active.passenger) "entered" else "arrived")
                                     }
@@ -673,7 +712,7 @@ class PawriroComposeActivity : ComponentActivity() {
             return SearchOffer(report.id,supplied.area,supplied.extraMinutes,passenger)
         }
         if (!state.demoMode) return null
-        return matchSearch(reports,demoRouteFor(state.place).drop(state.routePosition),passenger,
+        return matchSearch(reports,state.remainingDemoLine,passenger,
             if (reportId == null) state.asked else emptySet())
     }
 
@@ -687,7 +726,8 @@ class PawriroComposeActivity : ComponentActivity() {
         if (state.showingVehicleRoute) {
             if (realCandidate==null) return
         } else if (!state.demoMode ||
-            !hasSearchAreaAhead(state.searchableReports,demoRouteFor(state.place).drop(state.routePosition),state.asked)) return
+            !hasSearchAreaAhead(state.searchableReports,state.remainingDemoLine,state.asked)) return
+        if (state.orsDemo && !state.showingVehicleRoute && state.routePosition == 0) return
         val destination = state.place
         seatCheck = lifecycleScope.launch {
             val passenger = readPassenger()
@@ -696,13 +736,37 @@ class PawriroComposeActivity : ComponentActivity() {
             val found = candidate(passenger) ?: return@launch
             pendingDestination = destination
             reconfirmed = false
-            realPlan = findRealPlan(found)
+            realPlan = if (state.orsDemo && !state.showingVehicleRoute) null else findRealPlan(found)
             if (state.showingVehicleRoute && realPlan==null) return@launch
             if (!canOffer() || state.place != destination) return@launch
             if (candidate(passenger,found.reportId)!=found) return@launch
+            if (state.orsDemo && !state.showingVehicleRoute && !prepareOrsDetour(found)) return@launch
+            if (!canOffer() || candidate(passenger, found.reportId) != found) return@launch
             state.asked.add(found.reportId)
             showOffer(found)
         }
+    }
+
+    private suspend fun prepareOrsDetour(offer: SearchOffer): Boolean {
+        val destination = state.orsDestination ?: return false
+        val depart = state.movementFrames[state.routePosition]
+        val origin = geoPoint(depart)
+        val end = JSONArray().put(destination.longitude).put(destination.latitude)
+        val baseline = loadOrsDemoRoute(state.guardianAddress, listOf(origin, end))
+        val detour = baseline?.let {
+            loadOrsDemoRoute(state.guardianAddress, listOf(origin, geoPoint(offer.waypoint), end))
+        }
+        if (baseline == null || detour == null) {
+            if (canOffer()) state.notify("ORS 수색 경유 경로를 계산할 수 없어요")
+            return false
+        }
+        if (!canOffer() || depart != state.movementFrames[state.routePosition]) return false
+        val extra = (detour.seconds - baseline.seconds).coerceAtLeast(0.0)
+        if (extra > MAX_EXTRA_MINUTES * 60) return false
+        state.orsDetour = detour
+        state.orsDeparture = depart
+        state.proposedEta = baseline.minutes to detour.minutes
+        return true
     }
 
     private fun offerVehicleDetour() {
@@ -822,13 +886,15 @@ class PawriroComposeActivity : ComponentActivity() {
     }
 
     private fun showOffer(candidate: SearchOffer) {
-        state.proposedEta = offeredVehicleDetour?.let { (it.baselineSeconds+59)/60 to (it.detourSeconds+59)/60 }
+        if (!state.orsDemo || state.showingVehicleRoute) state.proposedEta = offeredVehicleDetour?.let { (it.baselineSeconds+59)/60 to (it.detourSeconds+59)/60 }
         state.proposedRealStop = realPlan?.stop?.name
         originalOffer = candidate
-        state.offer = candidate.copy(extraMinutes=realPlan?.extraMinutes ?: candidate.extraMinutes)
+        val orsExtra = if (state.orsDemo && !state.showingVehicleRoute)
+            state.proposedEta?.let { (base, detour) -> (detour - base).coerceAtLeast(0) } else null
+        state.offer = candidate.copy(extraMinutes=orsExtra ?: realPlan?.extraMinutes ?: candidate.extraMinutes)
         state.prompt = true
         val name = realPlan?.stop?.name ?: candidate.waypointName
-        val extra = realPlan?.extraMinutes ?: candidate.extraMinutes
+        val extra = state.offer?.extraMinutes ?: candidate.extraMinutes
         val message = "$name 경유 시 약 ${extra}분 더 걸려요. 참여할까요?"
         Log.i("PawriroDemo", message)
         if (realPlan != null && !state.demoMode) {
@@ -876,9 +942,10 @@ class PawriroComposeActivity : ComponentActivity() {
                 return@launch
             }
             if (changed) {
-                realPlan = findRealPlan(current)
+                realPlan = if (state.orsDemo && !state.showingVehicleRoute) null else findRealPlan(current)
                 if (state.showingVehicleRoute && realPlan==null) return@launch
                 if (!canOffer() || state.place != destination) return@launch
+                if (state.orsDemo && !state.showingVehicleRoute && !prepareOrsDetour(current)) return@launch
                 reconfirmed = true
                 showOffer(current)
                 return@launch
@@ -911,8 +978,19 @@ class PawriroComposeActivity : ComponentActivity() {
                 return@launch
             }
             if (!state.demoMode || state.showingVehicleRoute) return@launch
-            if (!failNext) state.demoWaypoints = state.demoWaypoints + current.waypoint
-            state.rescue = current.waypoint in state.demoWaypoints
+            if (state.orsDemo) {
+                val detour = state.orsDetour
+                state.rescue = !failNext && detour != null &&
+                    state.orsDeparture == state.movementFrames[state.routePosition]
+                if (state.rescue) {
+                    state.routePosition = 0
+                    state.orsRoute = detour
+                }
+                state.clearOrsDetour()
+            } else {
+                if (!failNext) state.demoWaypoints = state.demoWaypoints + current.waypoint
+                state.rescue = current.waypoint in state.demoWaypoints
+            }
             state.activeOffer = current.takeIf { state.rescue }
             if (state.rescue) {
                 participationId = participation.begin(current,true)
