@@ -58,7 +58,7 @@ final class VehicleRouting {
         try {
             Route result = route("driving-car",stops,100);
             if (result == null) throw new Api.Problem(404,"Route unavailable");
-            return Map.of("line",result.line());
+            return Map.of("line",result.line(),"seconds",result.seconds(),"meters",result.meters());
         } catch (InterruptedException cancelled) {
             Thread.currentThread().interrupt();
             throw new Api.Problem(503,"Routing interrupted");

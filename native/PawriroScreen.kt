@@ -9,6 +9,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
@@ -140,7 +142,9 @@ private fun SearchBar(state: PawriroState, modifier: Modifier, inline: Boolean, 
         Glyph(R.drawable.paw_search,if (inline) 24 else 28)
         val placeholder=if (inline) "어디로 갈까요?" else "목적지를 입력하세요"
         if (inline) {
-            BasicTextField(state.query,{ state.query=it },Modifier.weight(1f),singleLine=true,
+            val focusRequester = remember { FocusRequester() }
+            LaunchedEffect(Unit) { focusRequester.requestFocus() }
+            BasicTextField(state.query,{ state.query=it },Modifier.weight(1f).focusRequester(focusRequester),singleLine=true,
                 textStyle=TextStyle(color=ink,fontSize=18.sp,fontWeight=FontWeight.SemiBold),
                 cursorBrush=SolidColor(green),decorationBox={ inner ->
                     if (state.query.isEmpty()) Label(placeholder,18,muted,true)
@@ -163,7 +167,9 @@ private fun Home(state: PawriroState, narrow: Boolean) {
         val margin=if (narrow) 14 else 24
         val searchWidth=minOf(630.dp,maxWidth-(margin*2+76).dp)
         val active=state.searchableReports.filter { it.status==ReportStatus.Active }
-        PawriroMap(Modifier.matchParentSize(),visibleAreas=active.filter { it.publicCoverage.isEmpty() }.flatMap { it.areas },
+        PawriroMap(Modifier.matchParentSize(),geographic=true,
+            position=if (state.orsDemo) state.demoPosition else state.sdkLocation?.let { mapPoint(org.json.JSONArray().put(it.longitude).put(it.latitude)) },
+            visibleAreas=active.filter { it.publicCoverage.isEmpty() }.flatMap { it.areas },
             publicCoverage=active.flatMap { it.publicCoverage.values },
             reportPins=if (state.restricted) emptyList() else active.mapNotNull { it.pin },
             onArea=if (state.restricted) null else { area ->
@@ -181,8 +187,8 @@ private fun Home(state: PawriroState, narrow: Boolean) {
             HomeAction("내 신고","제보 확인 · 수정 · 종료",
                 R.drawable.paw_paw,size,narrow) { state.screen=Screen.Mine }
         }
-        if (state.sdkDestination != null || !state.demoMode) {
-            TextAction("차량 내비 경로",Modifier.align(Alignment.CenterEnd).padding(24.dp)) {
+        if (!state.orsDemo && (state.sdkDestination != null || !state.demoMode)) {
+            TextAction("차량 내비 경로",Modifier.align(Alignment.TopEnd).padding(top=90.dp,end=24.dp)) {
                 state.asked.clear()
                 state.showingVehicleRoute=true
                 state.screen=Screen.Drive
@@ -193,9 +199,6 @@ private fun Home(state: PawriroState, narrow: Boolean) {
                 state.screen=Screen.Participation
             }
         }
-        IconAction(R.drawable.paw_locate,"현재 위치",
-            Modifier.align(Alignment.BottomEnd).padding(end=margin.dp,bottom=if (narrow) 92.dp else 78.dp),
-            radius=18,elevation=8,click={})
         if (!narrow) {
             Row(Modifier.align(Alignment.BottomEnd).padding(24.dp).height(38.dp)
                 .background(Color(0xddffffff),RoundedCornerShape(10.dp)).padding(horizontal=14.dp),
@@ -223,14 +226,14 @@ private fun HomeAction(title: String, subtitle: String, icon: Int, modifier: Mod
 
 @Composable
 private fun Search(state: PawriroState) {
-    val real = !state.demoMode && !state.searchingLocation
+    val real = (!state.demoMode || state.orsDemo) && !state.searchingLocation
     val query = state.query.trim()
     var results by remember(query) { mutableStateOf(emptyList<DestinationResult>()) }
     var status by remember(query) { mutableStateOf("") }
     LaunchedEffect(real,query,state.guardianAddress) {
         if (!real || query.length !in 2..120) return@LaunchedEffect
         results=emptyList()
-        status="목적지 검색 중…"
+        status="ORS에서 장소 검색 중…"
         delay(450)
         try {
             val body=org.json.JSONObject().put("query",query)
@@ -252,14 +255,15 @@ private fun Search(state: PawriroState) {
         }
         Spacer(Modifier.fillMaxWidth().height(1.dp).background(border))
         Column(Modifier.widthIn(max=860.dp).verticalScroll(rememberScrollState()).padding(24.dp,30.dp)) {
-            Label("검색 결과",13,muted,true)
+            Label(if (real) "ORS 장소 검색 결과" else "검색 결과",13,muted,true)
             if (real) {
                 if (query.length<2) Label("장소명 또는 주소를 두 글자 이상 입력하세요",16,muted)
                 else if (query.length>120) Label("검색어를 120자 이내로 입력하세요",16,muted)
                 if (status.isNotEmpty()) Label(status,16,muted)
-                if (state.pendingNativeDestination != null)
+                if (!state.orsDemo && state.pendingNativeDestination != null)
                     Label("Pleos에서 경로 선택 후 pawriro로 돌아오세요",16,muted)
-                if (state.destinationStarting) Label("Pleos 안내 시작 확인 중…",16,muted)
+                if (state.destinationStarting) Label(
+                    if (state.orsDemo) "ORS 예상 경로 계산 중…" else "Pleos 안내 시작 확인 중…",16,muted)
                 else results.forEachIndexed { index, result ->
                     SearchRow(result.name,result.address,index+1) {
                         state.startDestination(result)
@@ -321,7 +325,9 @@ private fun Preview(state: PawriroState,narrow: Boolean) {
 @Composable
 private fun PreviewMap(state: PawriroState,modifier: Modifier) {
     Box(modifier) {
-        PawriroMap(Modifier.matchParentSize(),route=true,routePoints=demoRouteFor(state.place),
+        PawriroMap(Modifier.matchParentSize(),geographic=true,route=true,routePoints=state.orsBaseline?.line ?: demoRouteFor(state.place),
+            position=if (state.orsDemo) state.demoPosition else demoRoute.first(),
+            fitRoute=state.orsDemo,
             visibleAreas=state.searchableReports.filter { it.status==ReportStatus.Active && it.publicCoverage.isEmpty() }.flatMap { it.areas },
             publicCoverage=state.guardianReports.flatMap { it.publicCoverage.values })
         IconAction(R.drawable.paw_back,"검색 결과로",Modifier.padding(22.dp),elevation=8) { state.screen=Screen.Search }
@@ -334,7 +340,7 @@ private fun PreviewCard(state: PawriroState,narrow: Boolean,modifier: Modifier) 
         start=if (narrow) 20.dp else 30.dp,end=if (narrow) 20.dp else 30.dp,
         top=if (narrow) 20.dp else 34.dp,bottom=if (narrow) 20.dp else 28.dp)) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            Label("경로 미리보기",13,green,true)
+            Label(if (state.orsDemo) "ORS 예상 경로 · 가상 주행" else "경로 미리보기",13,green,true)
             Spacer(Modifier.height(8.dp))
             Label(state.place.name,if (narrow) 24 else 30,bold=true)
             Label(state.place.address,14,muted,modifier=Modifier.padding(top=8.dp,bottom=24.dp))
@@ -342,13 +348,13 @@ private fun PreviewCard(state: PawriroState,narrow: Boolean,modifier: Modifier) 
             Row(Modifier.padding(vertical=if (narrow) 12.dp else 22.dp),horizontalArrangement=Arrangement.spacedBy(14.dp)) {
                 Row(verticalAlignment=Alignment.Bottom) { Label("${state.place.time}",if (narrow) 34 else 42,green,true); Label("분",20,green,true) }
                 Label(state.place.distance,14,muted,modifier=Modifier.align(Alignment.Bottom))
-                Label("오후 10:48 도착",14,muted,modifier=Modifier.align(Alignment.Bottom))
+                if (!state.orsDemo) Label("오후 10:48 도착",14,muted,modifier=Modifier.align(Alignment.Bottom))
             }
             Spacer(Modifier.fillMaxWidth().height(1.dp).background(border))
             Row(Modifier.padding(vertical=if (narrow) 10.dp else 17.dp),horizontalArrangement=Arrangement.spacedBy(8.dp),
                 verticalAlignment=Alignment.CenterVertically) {
                 Box(Modifier.size(26.dp,5.dp).background(Color(0xff1677ff),RoundedCornerShape(5.dp)))
-                Label("추천 경로 · 통행료 0원",13,muted)
+                Label(if (state.orsDemo) "ORS 자동차 경로" else "추천 경로 · 통행료 0원",13,muted)
             }
         }
         Row(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
@@ -394,8 +400,10 @@ private fun Drive(state: PawriroState,narrow: Boolean) {
                 }
             }
         } else {
-            PawriroMap(Modifier.matchParentSize(),route=true,rescue=state.rescue,position=state.driveRoute[state.routePosition],
-                routePoints=state.driveRoute,rescueStop=state.activeOffer?.waypoint,
+            PawriroMap(Modifier.matchParentSize(),geographic=true,route=true,rescue=state.rescue,
+                position=if (state.orsDemo) state.demoPosition else state.movementFrames[state.routePosition],
+                routePoints=state.displayedRoute,fitRoute=state.orsDemo,rescueStop=state.activeOffer?.waypoint,
+                rescueStopName=state.activeOffer?.waypointName,
                 visibleAreas=state.searchableReports.filter { it.status==ReportStatus.Active && it.publicCoverage.isEmpty() }.flatMap { it.areas },
                 publicCoverage=state.guardianReports.flatMap { it.publicCoverage.values })
         }
@@ -407,9 +415,9 @@ private fun Drive(state: PawriroState,narrow: Boolean) {
                 Glyph(if (live) R.drawable.paw_flag else R.drawable.paw_turn,48)
             }
             Column {
-                Label(if (live) "차량 내비" else "300 m",if (narrow) 27 else 34,Color.White,true)
+                Label(if (live) "차량 내비" else if (state.orsDemo) "시연 주행" else "300 m",if (narrow) 27 else 34,Color.White,true)
                 Label(if (live) turn?.let { "${it.distance.toInt()} m · ${it.description}" }
-                    ?: "회전 안내 정보 미확보" else "성수대교 방면 좌회전",15,Color(0xffcad2cd))
+                    ?: "회전 안내 정보 미확보" else if (state.orsDemo) "" else "성수대교 방면 좌회전",15,Color(0xffcad2cd))
             }
         }
         val margin=if (narrow) 12.dp else 20.dp
@@ -425,9 +433,10 @@ private fun Drive(state: PawriroState,narrow: Boolean) {
             }
             Row(horizontalArrangement=Arrangement.spacedBy(if (narrow) 8.dp else 14.dp),
                 verticalAlignment=Alignment.CenterVertically) {
-                Label(if (live) destination?.remainTime?.takeIf { it>=0 }?.let { "${(it.toLong()+59)/60}분" } ?: "시간 미확보" else "${state.place.time + (state.activeOffer?.extraMinutes ?: 0)}분",if (narrow) 25 else 33,Color.White,true)
-                Label(if (live) destination?.remainDistance?.takeIf { it>=0 }?.let { "%.1f km".format(it/1000.0) } ?: "거리 미확보" else state.place.distance,13,Color(0xffc2cbc5))
-                if (!live) Label("오후 10:${48 + (state.activeOffer?.extraMinutes ?: 0)} 도착",13,Color(0xffc2cbc5))
+                Label(if (live) destination?.remainTime?.takeIf { it>=0 }?.let { "${(it.toLong()+59)/60}분" } ?: "시간 미확보" else "${state.orsRoute?.minutes ?: (state.place.time + (state.activeOffer?.extraMinutes ?: 0))}분",if (narrow) 25 else 33,Color.White,true)
+                Label(if (live) destination?.remainDistance?.takeIf { it>=0 }?.let { "%.1f km".format(it/1000.0) } ?: "거리 미확보" else state.orsRoute?.let { "%.1f km".format(it.meters / 1000) } ?: state.place.distance,13,Color(0xffc2cbc5))
+                if (!live) Label(if (state.orsDemo) "ORS 예상 · 가상 주행"
+                    else "오후 10:${48 + (state.activeOffer?.extraMinutes ?: 0)} 도착",13,Color(0xffc2cbc5))
             }
             if (!narrow) {
                 Spacer(Modifier.width(1.dp).height(48.dp).background(Color(0xff435047)))
@@ -450,33 +459,31 @@ private fun Drive(state: PawriroState,narrow: Boolean) {
                 if (!state.restricted) Label(state.speechDiagnostic,13,muted)
             }
         }
-        if (state.rescue && !live) {
-            Row(Modifier.offset(x=width*(if (narrow) .48f else .62f),y=height*.36f)
-                .shadow(5.dp,RoundedCornerShape(12.dp)).background(Color.White,RoundedCornerShape(12.dp))
-                .padding(horizontal=13.dp,vertical=9.dp),horizontalArrangement=Arrangement.spacedBy(8.dp),
-                verticalAlignment=Alignment.CenterVertically) {
-                Box(Modifier.size(32.dp).background(violet,RoundedCornerShape(50)),Alignment.Center) { Label("1",16,Color.White,true) }
-                Column { Label("수색 경유지",13,bold=true); Label(state.appliedRealStop ?: state.activeOffer?.waypointName.orEmpty(),10,muted) }
+        if (!live && !state.restricted) {
+            TextAction("목적지 변경", Modifier.align(Alignment.TopEnd).padding(22.dp), height=54) {
+                state.stop()
+                state.query=""
+                state.screen=Screen.Search
             }
         }
         if (state.prompt) {
             Row(Modifier.align(Alignment.Center).offset(y=height*(if (narrow) -.06f else -.04f))
-                .width(if (narrow) width-28.dp else minOf(580.dp,width*.8f))
+                .width(if (narrow) width-28.dp else minOf(700.dp,width*.88f))
                 .shadow(16.dp,RoundedCornerShape(22.dp)).background(Color(0xf517221c),RoundedCornerShape(22.dp))
-                .border(1.dp,Color(0xff536059),RoundedCornerShape(22.dp)).padding(horizontal=24.dp,vertical=20.dp),
+                .border(1.dp,Color(0xff536059),RoundedCornerShape(22.dp)).padding(horizontal=28.dp,vertical=28.dp),
                 horizontalArrangement=Arrangement.spacedBy(18.dp),verticalAlignment=Alignment.CenterVertically) {
-                Row(Modifier.size(58.dp).background(lime,RoundedCornerShape(50)),Arrangement.Center,Alignment.CenterVertically) {
+                Row(Modifier.size(68.dp).background(lime,RoundedCornerShape(50)),Arrangement.Center,Alignment.CenterVertically) {
                     listOf(11,24,17,8).forEach {
                         Box(Modifier.padding(horizontal=1.5.dp).size(3.dp,it.dp).background(dark,RoundedCornerShape(3.dp)))
                     }
                 }
                 Column {
-                    Label(state.proposedRealStop ?: state.offer?.waypointName ?: "수색 요청이 경로 근처에 있어요",19,Color.White,true)
+                    Label(state.proposedRealStop ?: state.offer?.waypointName ?: "수색 요청이 경로 근처에 있어요",24,Color.White,true)
                     state.proposedEta?.let { (original,detour) ->
-                        Label("기존 약 ${original}분 · 경유 약 ${detour}분",14,Color.White)
+                        Label("기존 약 ${original}분 · 경유 약 ${detour}분",19,Color.White)
                     }
-                    Label("약 ${state.offer?.extraMinutes}분 더 걸려요. 참여할까요?",17,Color.White)
-                    Label("음성으로 “참여할게” 또는 “건너뛸게”라고 말하세요",11,Color(0xffacb7af))
+                    Label("약 ${state.offer?.extraMinutes}분 더 걸려요. 참여할까요?",23,Color.White,true)
+                    Label(if (state.orsDemo) "가상 주행 · 시연 응답 대기" else "음성으로 “참여할게” 또는 “건너뛸게”라고 말하세요",15,Color(0xffacb7af))
                 }
             }
         }

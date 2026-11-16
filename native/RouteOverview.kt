@@ -58,7 +58,7 @@ internal fun RouteOverview(state: PawriroState, modifier: Modifier, content: @Co
         }
     }
     val zones=state.guardianReports.flatMap { it.publicCoverage.values }
-    RouteOverviewCanvas(line,zones,position,modifier)
+    GeographicMap(modifier,line=line,position=position,zones=zones)
     content(line.size>=2,if (enabled) status else if (position==null) "차량 위치 확인 중" else "")
 }
 
